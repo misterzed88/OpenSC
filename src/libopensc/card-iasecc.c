@@ -2189,50 +2189,26 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 	       "iasecc_pin_get_policy() sdo.docp.size.size %"SC_FORMAT_LEN_SIZE_T"u",
 	       sdo.docp.size.size);
 	for (ii=0; ii<sizeof(sdo.docp.scbs); ii++)   {
-		struct iasecc_se_info se;
 		unsigned char scb = sdo.docp.scbs[ii];
 		struct sc_acl_entry *acl = &data->pin1.acls[ii];
-		int crt_num = 0;
-
-		memset(&se, 0, sizeof(se));
-		memset(&acl->crts, 0, sizeof(acl->crts));
 
 		sc_log(ctx, "iasecc_pin_get_policy() set info acls: SCB 0x%X", scb);
-		/* acl->raw_value = scb; */
+
+		/* Note that method should be mapped to a correct SC_AC_xxx constant, but leave for now */
 		acl->method = scb & IASECC_SCB_METHOD_MASK;
 		acl->key_ref = scb & IASECC_SCB_METHOD_MASK_REF;
 
 		if (scb==0 || scb==0xFF)
 			continue;
 
-		if (se.reference != (int)acl->key_ref)   {
-			memset(&se, 0, sizeof(se));
-
-			se.reference = acl->key_ref;
-
-			rv = iasecc_se_get_info(card, &se);
-			LOG_TEST_GOTO_ERR(ctx, rv, "SDO get data error");
-		}
-
-		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
-			rv = iasecc_se_get_crt_by_usage(card, &se,
-					IASECC_CRT_TAG_AT, IASECC_UQB_AT_USER_PASSWORD, &acl->crts[crt_num]);
-			LOG_TEST_GOTO_ERR(ctx, rv, "no authentication template for 'USER PASSWORD'");
-			sc_log(ctx, "iasecc_pin_get_policy() scb:0x%X; sdo_ref:[%i,%i,...]",
-					scb, acl->crts[crt_num].refs[0], acl->crts[crt_num].refs[1]);
-			crt_num++;
-		}
-
 		if (scb & (IASECC_SCB_METHOD_SM | IASECC_SCB_METHOD_EXT_AUTH))   {
 			sc_log(ctx, "'SM' and 'EXTERNAL AUTHENTICATION' protection methods are not supported: SCB:0x%X", scb);
 			/* Set to 'NEVER' if all conditions are needed or
 			 * there is no user authentication method allowed */
-			if (!crt_num || (scb & IASECC_SCB_METHOD_NEED_ALL))
+			if (!(scb & IASECC_SCB_METHOD_USER_AUTH) || (scb & IASECC_SCB_METHOD_NEED_ALL))
 				acl->method = SC_AC_NEVER;
 			continue;
 		}
-
-		sc_file_free(se.df);
 	}
 
 	if (sdo.data.chv.size_max.value)

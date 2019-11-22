@@ -1853,8 +1853,8 @@ iasecc_chv_verify(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd,
 	sc_log(ctx, "Verify CHV PIN(ref:%i,len:%i,acl:%X:%X)", pin_cmd->pin_reference, pin_cmd->pin1.len,
 			acl.method, acl.key_ref);
 
-	if (acl.method & IASECC_SCB_METHOD_SM)   {
-		rv = iasecc_sm_pin_verify(card, acl.key_ref, pin_cmd, tries_left);
+	if (acl.method == SC_AC_SCB && acl.key_ref & IASECC_SCB_METHOD_SM) {
+		rv = iasecc_sm_pin_verify(card, acl.key_ref & IASECC_SCB_METHOD_MASK_REF, pin_cmd, tries_left);
 		LOG_FUNC_RETURN(ctx, rv);
 	}
 
@@ -1940,7 +1940,7 @@ iasecc_pin_is_verified(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd_dat
 		LOG_TEST_RET(ctx, SC_ERROR_NOT_SUPPORTED, "PIN type is not supported for the verification");
 
 	sc_log(ctx, "Verify ACL(method:%X;ref:%X)", acl.method, acl.key_ref);
-	if (acl.method != IASECC_SCB_ALWAYS)
+	if (acl.method != SC_AC_SCB || acl.key_ref != IASECC_SCB_ALWAYS)
 		LOG_FUNC_RETURN(ctx, SC_ERROR_SECURITY_STATUS_NOT_SATISFIED);
 
 	pin_cmd = *pin_cmd_data;
@@ -2194,9 +2194,8 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 
 		sc_log(ctx, "iasecc_pin_get_policy() set info acls: SCB 0x%X", scb);
 
-		/* Note that method should be mapped to a correct SC_AC_xxx constant, but leave for now */
-		acl->method = scb & IASECC_SCB_METHOD_MASK;
-		acl->key_ref = scb & IASECC_SCB_METHOD_MASK_REF;
+		acl->method = SC_AC_SCB;
+		acl->key_ref = scb;
 
 		if (scb==0 || scb==0xFF)
 			continue;

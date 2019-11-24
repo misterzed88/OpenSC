@@ -116,12 +116,24 @@ struct iasecc_pin_status  {
 
 struct iasecc_pin_status *checked_pins = NULL;
 
+/* Any absent field is set to -1, except acls, which is always present */
+struct iasecc_pin_policy {
+	int min_length;
+	int max_length;
+	int stored_length;
+	int tries_maximum;
+	int tries_remaining;
+	struct sc_acl_entry acls[SC_MAX_SDO_ACLS];
+};
+
 static int iasecc_select_file(struct sc_card *card, const struct sc_path *path, struct sc_file **file_out);
 static int iasecc_process_fci(struct sc_card *card, struct sc_file *file, const unsigned char *buf, size_t buflen);
 static int iasecc_get_serialnr(struct sc_card *card, struct sc_serial_number *serial);
 static int iasecc_sdo_get_data(struct sc_card *card, struct iasecc_sdo *sdo);
-static int iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data);
+static int iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data, struct iasecc_pin_policy *pin);
 static int iasecc_pin_get_status(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left);
+static int iasecc_pin_get_info(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left);
+static int iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data);
 static int iasecc_get_free_reference(struct sc_card *card, struct iasecc_ctl_get_free_reference *ctl_data);
 static int iasecc_sdo_put_data(struct sc_card *card, struct iasecc_sdo_update *update);
 
@@ -1837,8 +1849,7 @@ iasecc_chv_verify_pinpad(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd, 
 
 
 static int
-iasecc_chv_verify(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd,
-		int *tries_left)
+iasecc_chv_verify(struct sc_card *card, struct sc_pin_cmd_data *pin_cmd, int *tries_left)
 {
 	struct sc_context *ctx = card->ctx;
 	struct sc_acl_entry acl = pin_cmd->pin1.acls[IASECC_ACLS_CHV_VERIFY];
@@ -1950,18 +1961,18 @@ iasecc_pin_get_status(struct sc_card *card, struct sc_pin_cmd_data *data, int *t
 
 
 static int
-iasecc_pin_verify(struct sc_card *card, unsigned type, unsigned reference,
-		const unsigned char *data, size_t data_len, int *tries_left)
+iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
 	struct sc_context *ctx = card->ctx;
+	unsigned type = data->pin_type;
+	unsigned reference = data->pin_reference;
 	struct sc_pin_cmd_data pin_cmd;
-	unsigned chv_ref = reference;
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx,
-	       "Verify PIN(type:%X,ref:%i,data(len:%"SC_FORMAT_LEN_SIZE_T"u,%p)",
-	       type, reference, data_len, data);
+	       "Verify PIN(type:%X,ref:%i,data(len:%i,%p)",
+	       type, reference, data->pin1.len, data->pin1.data);
 
 	if (type == SC_AC_AUT)   {
 		rv =  iasecc_sm_external_authentication(card, reference, tries_left);
@@ -1979,23 +1990,17 @@ iasecc_pin_verify(struct sc_card *card, unsigned type, unsigned reference,
 	}
 
 	if (type == SC_AC_SEN)   {
-		rv = iasecc_se_at_to_chv_reference(card, reference,  &chv_ref);
+		rv = iasecc_se_at_to_chv_reference(card, reference,  &reference);
 		LOG_TEST_RET(ctx, rv, "SE AT to CHV reference error");
 	}
 
-	memset(&pin_cmd, 0, sizeof(pin_cmd));
+	pin_cmd = *data;
 	pin_cmd.pin_type = SC_AC_CHV;
-	pin_cmd.pin_reference = chv_ref;
+	pin_cmd.pin_reference = reference;
 	pin_cmd.cmd = SC_PIN_CMD_VERIFY;
 
-	rv = iasecc_pin_get_policy(card, &pin_cmd);
-	LOG_TEST_RET(ctx, rv, "Get 'PIN policy' error");
-
-	pin_cmd.pin1.data = data;
-	pin_cmd.pin1.len = data_len;
-
 	rv = iasecc_pin_get_status(card, &pin_cmd, tries_left);
-	if (data && !data_len)
+	if (data->pin1.data && !data->pin1.len)
 		LOG_FUNC_RETURN(ctx, rv);
 
 	if (!rv)   {
@@ -2009,6 +2014,9 @@ iasecc_pin_verify(struct sc_card *card, unsigned type, unsigned reference,
 
 	iasecc_chv_cache_clean(card, &pin_cmd);
 
+	rv = iasecc_pin_merge_policy(card, &pin_cmd);
+	LOG_TEST_RET(ctx, rv, "Merge 'PIN policy' error");
+
 	rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
 	LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
 
@@ -2019,7 +2027,7 @@ iasecc_pin_verify(struct sc_card *card, unsigned type, unsigned reference,
 
 
 static int
-iasecc_chv_change_pinpad(struct sc_card *card, unsigned reference, int *tries_left)
+iasecc_chv_change_pinpad(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
 	struct sc_context *ctx = card->ctx;
 	struct sc_pin_cmd_data pin_cmd;
@@ -2027,7 +2035,7 @@ iasecc_chv_change_pinpad(struct sc_card *card, unsigned reference, int *tries_le
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "CHV PINPAD PIN reference %i", reference);
+	sc_log(ctx, "CHV PINPAD PIN reference %i", data->pin_reference);
 
 	memset(pin1_data, 0xFF, sizeof(pin1_data));
 	memset(pin2_data, 0xFF, sizeof(pin2_data));
@@ -2037,14 +2045,12 @@ iasecc_chv_change_pinpad(struct sc_card *card, unsigned reference, int *tries_le
 		LOG_FUNC_RETURN(ctx, SC_ERROR_READER);
 	}
 
-	memset(&pin_cmd, 0, sizeof(pin_cmd));
-	pin_cmd.pin_type = SC_AC_CHV;
-	pin_cmd.pin_reference = reference;
+	pin_cmd = *data;
 	pin_cmd.cmd = SC_PIN_CMD_CHANGE;
 	pin_cmd.flags |= SC_PIN_CMD_USE_PINPAD;
 
-	rv = iasecc_pin_get_policy(card, &pin_cmd);
-	LOG_TEST_RET(ctx, rv, "Get 'PIN policy' error");
+	rv = iasecc_pin_merge_policy(card, &pin_cmd);
+	LOG_TEST_RET(ctx, rv, "Merge 'PIN policy' error");
 
 	/* Some pin-pads do not support mode with Lc=0.
 	 * Give them a chance to work with some cards.
@@ -2124,7 +2130,7 @@ iasecc_chv_set_pinpad(struct sc_card *card, unsigned char reference)
 
 
 static int
-iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
+iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data, struct iasecc_pin_policy *pin)
 {
 	struct sc_context *ctx = card->ctx;
 	struct sc_file *save_current_df = NULL, *save_current_ef = NULL;
@@ -2137,7 +2143,7 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 	sc_log(ctx, "iasecc_pin_get_policy(card:%p)", card);
 
 	if (data->pin_type != SC_AC_CHV)   {
-		sc_log(ctx, "To unblock PIN it's CHV reference should be presented");
+		sc_log(ctx, "PIN policy only available for CHV type");
 		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
@@ -2187,14 +2193,14 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 	       sdo.docp.size.size);
 	for (ii=0; ii<sizeof(sdo.docp.scbs); ii++)   {
 		unsigned char scb = sdo.docp.scbs[ii];
-		struct sc_acl_entry *acl = &data->pin1.acls[ii];
+		struct sc_acl_entry *acl = &pin->acls[ii];
 
 		sc_log(ctx, "iasecc_pin_get_policy() set info acls: SCB 0x%X", scb);
 
 		acl->method = SC_AC_SCB;
 		acl->key_ref = scb;
 
-		if (scb==0 || scb==0xFF)
+		if (scb==IASECC_SCB_ALWAYS || scb==IASECC_SCB_NEVER)
 			continue;
 
 		if (scb & (IASECC_SCB_METHOD_SM | IASECC_SCB_METHOD_EXT_AUTH))   {
@@ -2207,27 +2213,21 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 		}
 	}
 
-	if (sdo.data.chv.size_max.value)
-		data->pin1.max_length = *sdo.data.chv.size_max.value;
-	if (sdo.data.chv.size_min.value)
-		data->pin1.min_length = *sdo.data.chv.size_min.value;
-	if (sdo.docp.tries_maximum.value)
-		data->pin1.max_tries = *sdo.docp.tries_maximum.value;
-	if (sdo.docp.tries_remaining.value)
-		data->pin1.tries_left = *sdo.docp.tries_remaining.value;
-	if (sdo.docp.size.value)   {
+	pin->min_length = (sdo.data.chv.size_min.value ? *sdo.data.chv.size_min.value : -1);
+	pin->max_length = (sdo.data.chv.size_max.value ? *sdo.data.chv.size_max.value : -1);
+	pin->tries_maximum = (sdo.docp.tries_maximum.value ? *sdo.docp.tries_maximum.value : -1);
+	pin->tries_remaining = (sdo.docp.tries_remaining.value ? *sdo.docp.tries_remaining.value : -1);
+	if (sdo.docp.size.value && sdo.docp.size.size <= sizeof(int)) {
+		unsigned int n = 0;
 		for (ii=0; ii<sdo.docp.size.size; ii++)
-			data->pin1.stored_length = ((data->pin1.stored_length) << 8) + *(sdo.docp.size.value + ii);
+			n = (n << 8) + *(sdo.docp.size.value + ii);
+		pin->stored_length = n;
+	} else {
+		pin->stored_length = -1;
 	}
 
-	data->pin1.encoding = SC_PIN_ENCODING_ASCII;
-	data->pin1.offset = 5;
-	data->pin1.logged_in = SC_PIN_STATE_UNKNOWN;
-
-	sc_log(ctx,
-	       "PIN policy: size max/min %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u, tries max/left %i/%i",
-	       data->pin1.max_length, data->pin1.min_length,
-	       data->pin1.max_tries, data->pin1.tries_left);
+	sc_log(ctx, "PIN policy: size max/min %i/%i, tries max/left %i/%i",
+	       pin->max_length, pin->min_length, pin->tries_maximum, pin->tries_remaining);
 	iasecc_sdo_free_fields(card, &sdo);
 
 	if (save_current_df)   {
@@ -2245,6 +2245,90 @@ iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data)
 err:
 	sc_file_free(save_current_df);
 	sc_file_free(save_current_ef);
+
+	LOG_FUNC_RETURN(ctx, rv);
+}
+
+
+static int
+iasecc_pin_get_info(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
+{
+	struct sc_context *ctx = card->ctx;
+	struct iasecc_pin_policy pin;
+	int rv;
+
+	LOG_FUNC_CALLED(ctx);
+	sc_log(ctx, "iasecc_pin_get_info(card:%p)", card);
+
+	/*
+	 * Get PIN status first and thereafter update with info from PIN policy, when available.
+	 * The first one is typically used for the PIN verification status and number of remaining
+	 * tries, and the second one for the maximum tries. If a field is present in both, the
+	 * policy takes precedence.
+	 */
+	rv = iasecc_pin_get_status(card, data, tries_left);
+	LOG_TEST_RET(ctx, rv, "Failed to get PIN status");
+
+	rv = iasecc_pin_get_policy(card, data, &pin);
+	LOG_TEST_RET(ctx, rv, "Failed to get PIN policy");
+
+	/*
+	 * We only care about the tries_xxx fields in the PIN policy, since the other ones are not
+	 * commonly expected or used in a SC_PIN_CMD_GET_INFO response.	Note that max_tries is
+	 * always taken from the policy, since it is never expected to be available in status (it
+	 * is set to -1 when not available in policy).
+	 */
+	data->pin1.max_tries = pin.tries_maximum;
+	if (pin.tries_remaining >= 0)
+		data->pin1.tries_left = pin.tries_remaining;
+
+	if (tries_left)
+		*tries_left = data->pin1.tries_left;
+
+	LOG_FUNC_RETURN(ctx, rv);
+}
+
+
+/*
+ * Retrieve the PIN policy and combine it with the existing fields in an intelligent way. This is
+ * needed since we may be called with existing settings, typically from the PKCS #15 layer. We use
+ * the IAS-ECC card-level PIN settings as complementary.
+ */
+static int
+iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data)
+{
+	struct sc_context *ctx = card->ctx;
+	struct iasecc_pin_policy pin;
+	int rv;
+
+	LOG_FUNC_CALLED(ctx);
+	sc_log(ctx, "iasecc_pin_merge_policy(card:%p)", card);
+
+	rv = iasecc_pin_get_policy(card, data, &pin);
+	LOG_TEST_RET(ctx, rv, "Failed to get PIN policy");
+
+	/* Take the most limited values of min/max lengths */
+	if (pin.min_length > 0 && (size_t) pin.min_length > data->pin1.min_length)
+		data->pin1.min_length = pin.min_length;
+	if (pin.max_length > 0 && (!data->pin1.max_length || (size_t) pin.max_length < data->pin1.max_length))
+		data->pin1.max_length = pin.max_length;
+
+	/*
+	 * If we have padding info provided to us by the caller, it takes precedence. When not
+	 * available, attempt to get it from the stored length field of the PIN policy, assuming
+	 * 0xff as the padding character.
+	 */
+	if (!(data->flags & SC_PIN_CMD_NEED_PADDING && pin.stored_length > 0)) {
+		data->pin1.pad_length = pin.stored_length;
+		data->pin1.pad_char = 0xff;
+		data->flags |= SC_PIN_CMD_NEED_PADDING;
+	}		
+
+	/*
+	 * Copy the acl from the policy. It does not really belong in sc_pin_cmd_pin structure
+	 * since it is card-specific, but we leave it there to minimize code changes for now.
+	 */
+	memcpy(data->pin1.acls, pin.acls, sizeof(pin.acls));
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
@@ -2307,16 +2391,16 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 {
 	struct sc_context *ctx = card->ctx;
 	struct sc_apdu apdu;
-	unsigned reference = data->pin_reference;
 	unsigned char pin_data[0x100];
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "Change PIN(ref:%i,type:0x%X,lengths:%i/%i)", reference, data->pin_type, data->pin1.len, data->pin2.len);
+	sc_log(ctx, "Change PIN(ref:%i,type:0x%X,lengths:%i/%i)",
+	       data->pin_reference, data->pin_type, data->pin1.len, data->pin2.len);
 
 	if ((card->reader->capabilities & SC_READER_CAP_PIN_PAD))   {
 		if (!data->pin1.data && !data->pin1.len && !data->pin2.data && !data->pin2.len)   {
-			rv = iasecc_chv_change_pinpad(card, reference, tries_left);
+			rv = iasecc_chv_change_pinpad(card, data, tries_left);
 			sc_log(ctx, "iasecc_pin_cmd(SC_PIN_CMD_CHANGE) chv_change_pinpad returned %i", rv);
 			LOG_FUNC_RETURN(ctx, rv);
 		}
@@ -2328,7 +2412,7 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	if (!data->pin2.data && data->pin2.len)
 		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid PIN2 arguments");
 
-	rv = iasecc_pin_verify(card, data->pin_type, reference, data->pin1.data, data->pin1.len, tries_left);
+	rv = iasecc_pin_verify(card, data, tries_left);
 	sc_log(ctx, "iasecc_pin_cmd(SC_PIN_CMD_CHANGE) pin_verify returned %i", rv);
 	LOG_TEST_RET(ctx, rv, "PIN verification error");
 
@@ -2340,7 +2424,7 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	if (data->pin2.data)
 		memcpy(pin_data + data->pin1.len, data->pin2.data, data->pin2.len);
 
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x24, 0, reference);
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x24, 0, data->pin_reference);
 	apdu.data = pin_data;
 	apdu.datalen = data->pin1.len + data->pin2.len;
 	apdu.lc = apdu.datalen;
@@ -2405,8 +2489,13 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		unsigned char se_num = scb & IASECC_SCB_METHOD_MASK_REF;
 
 		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
+			struct sc_pin_cmd_data pin_cmd;
+
 			sc_log(ctx, "Verify PIN in SE %X", se_num);
-			rv = iasecc_pin_verify(card, SC_AC_SEN, se_num, data->pin1.data, data->pin1.len, tries_left);
+			pin_cmd = *data;
+			pin_cmd.pin_type = SC_AC_SEN;
+			pin_cmd.pin_reference = se_num;
+			rv = iasecc_pin_verify(card, &pin_cmd, tries_left);
 			LOG_TEST_RET(ctx, rv, "iasecc_pin_reset() verify PUK error");
 
 			if (!need_all)
@@ -2479,7 +2568,7 @@ iasecc_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_le
 
 	switch (data->cmd)   {
 	case SC_PIN_CMD_VERIFY:
-		rv = iasecc_pin_verify(card, data->pin_type, data->pin_reference, data->pin1.data, data->pin1.len, tries_left);
+		rv = iasecc_pin_verify(card, data, tries_left);
 		break;
 	case SC_PIN_CMD_CHANGE:
 		if (data->pin_type == SC_AC_AUT)
@@ -2491,7 +2580,7 @@ iasecc_pin_cmd(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_le
 		rv = iasecc_pin_reset(card, data, tries_left);
 		break;
 	case SC_PIN_CMD_GET_INFO:
-		rv = iasecc_pin_get_policy(card, data);
+		rv = iasecc_pin_get_info(card, data, tries_left);
 		break;
 	default:
 		sc_log(ctx, "Other pin commands not supported yet: 0x%X", data->cmd);

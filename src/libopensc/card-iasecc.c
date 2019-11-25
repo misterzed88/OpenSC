@@ -1908,20 +1908,23 @@ iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 		rv =  iasecc_sm_external_authentication(card, reference, tries_left);
 		LOG_FUNC_RETURN(ctx, rv);
 	}
-	else if (type == SC_AC_SCB)   {
+
+	if (type == SC_AC_SCB)   {
 		if (reference & IASECC_SCB_METHOD_USER_AUTH)   {
 			type = SC_AC_SEN;
 			reference = reference & IASECC_SCB_METHOD_MASK_REF;
 		}
-		else   {
-			sc_log(ctx, "Do not try to verify non CHV PINs");
-			LOG_FUNC_RETURN(ctx, SC_SUCCESS);
-		}
 	}
 
 	if (type == SC_AC_SEN)   {
+		type = SC_AC_CHV;
 		rv = iasecc_se_at_to_chv_reference(card, reference,  &reference);
 		LOG_TEST_RET(ctx, rv, "SE AT to CHV reference error");
+	}
+
+	if (type != SC_AC_CHV)   {
+		sc_log(ctx, "Do not try to verify non CHV PINs");
+		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
 	}
 
 	pin_cmd = *data;

@@ -1924,7 +1924,7 @@ iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 
 	if (type != SC_AC_CHV)   {
 		sc_log(ctx, "Do not try to verify non CHV PINs");
-		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
+		LOG_FUNC_RETURN(ctx, SC_ERROR_INVALID_ARGUMENTS);
 	}
 
 	pin_cmd = *data;
@@ -1954,60 +1954,6 @@ iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
 
 	rv = iasecc_chv_cache_verified(card, &pin_cmd);
-
-	LOG_FUNC_RETURN(ctx, rv);
-}
-
-
-static int
-iasecc_chv_change_pinpad(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
-{
-	struct sc_context *ctx = card->ctx;
-	struct sc_pin_cmd_data pin_cmd;
-	unsigned char pin1_data[0x100], pin2_data[0x100];
-	int rv;
-
-	LOG_FUNC_CALLED(ctx);
-	sc_log(ctx, "CHV PINPAD PIN reference %i", data->pin_reference);
-
-	memset(pin1_data, 0xFF, sizeof(pin1_data));
-	memset(pin2_data, 0xFF, sizeof(pin2_data));
-
-	if (!card->reader || !card->reader->ops || !card->reader->ops->perform_verify)   {
-		sc_log(ctx, "Reader not ready for PIN PAD");
-		LOG_FUNC_RETURN(ctx, SC_ERROR_READER);
-	}
-
-	pin_cmd = *data;
-	pin_cmd.cmd = SC_PIN_CMD_CHANGE;
-	pin_cmd.flags |= SC_PIN_CMD_USE_PINPAD;
-
-	rv = iasecc_pin_merge_policy(card, &pin_cmd);
-	LOG_TEST_RET(ctx, rv, "Merge 'PIN policy' error");
-
-	/* Some pin-pads do not support mode with Lc=0.
-	 * Give them a chance to work with some cards.
-	 */
-	if ((pin_cmd.pin1.min_length == pin_cmd.pin1.stored_length) && (pin_cmd.pin1.max_length == pin_cmd.pin1.min_length))
-		pin_cmd.pin1.len = pin_cmd.pin1.stored_length;
-	else
-		pin_cmd.pin1.len = 0;
-
-	pin_cmd.pin1.length_offset = 5;
-	pin_cmd.pin1.data = pin1_data;
-
-	memcpy(&pin_cmd.pin2, &pin_cmd.pin1, sizeof(pin_cmd.pin1));
-	pin_cmd.pin2.data = pin2_data;
-
-	sc_log(ctx,
-	       "PIN1 max/min/stored: %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
-	       pin_cmd.pin1.max_length, pin_cmd.pin1.min_length,
-	       pin_cmd.pin1.stored_length);
-	sc_log(ctx,
-	       "PIN2 max/min/stored: %"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u/%"SC_FORMAT_LEN_SIZE_T"u",
-	       pin_cmd.pin2.max_length, pin_cmd.pin2.min_length,
-	       pin_cmd.pin2.stored_length);
-	rv = iso_ops->pin_cmd(card, &pin_cmd, tries_left);
 
 	LOG_FUNC_RETURN(ctx, rv);
 }
@@ -2323,50 +2269,45 @@ static int
 iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
 	struct sc_context *ctx = card->ctx;
-	struct sc_apdu apdu;
-	unsigned char pin_data[0x100];
+	struct sc_pin_cmd_data pin_cmd;
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "Change PIN(ref:%i,type:0x%X,lengths:%i/%i)",
 	       data->pin_reference, data->pin_type, data->pin1.len, data->pin2.len);
 
-	if ((card->reader->capabilities & SC_READER_CAP_PIN_PAD))   {
-		if (!data->pin1.data && !data->pin1.len && !data->pin2.data && !data->pin2.len)   {
-			rv = iasecc_chv_change_pinpad(card, data, tries_left);
-			sc_log(ctx, "iasecc_pin_cmd(SC_PIN_CMD_CHANGE) chv_change_pinpad returned %i", rv);
-			LOG_FUNC_RETURN(ctx, rv);
-		}
+	if (data->pin_type != SC_AC_CHV)   {
+		sc_log(ctx, "Can not change non-CHV PINs");
+		LOG_FUNC_RETURN(ctx, SC_ERROR_NOT_SUPPORTED);
 	}
 
-	if (!data->pin1.data && data->pin1.len)
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid PIN1 arguments");
+	/*
+	 * Verify the original PIN. This would normally not be needed since it is implicitly done
+	 * by the card when executing a PIN change command. But we must go through our verification
+	 * function in order to handle secure messaging setup, if enabled for the PIN. As a bonus
+	 * we have also retrieved the PIN policy which is used in the PIN change command below.
+	 */
+	pin_cmd = *data;
+	pin_cmd.cmd = SC_PIN_CMD_VERIFY;
 
-	if (!data->pin2.data && data->pin2.len)
-		LOG_TEST_RET(ctx, SC_ERROR_INVALID_ARGUMENTS, "Invalid PIN2 arguments");
+	rv = iasecc_pin_merge_policy(card, &pin_cmd);
+	LOG_TEST_RET(ctx, rv, "Merge 'PIN policy' error");
 
-	rv = iasecc_pin_verify(card, data, tries_left);
-	sc_log(ctx, "iasecc_pin_cmd(SC_PIN_CMD_CHANGE) pin_verify returned %i", rv);
-	LOG_TEST_RET(ctx, rv, "PIN verification error");
+	rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
+	LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
 
-	if ((unsigned)(data->pin1.len + data->pin2.len) > sizeof(pin_data))
-		LOG_TEST_RET(ctx, SC_ERROR_BUFFER_TOO_SMALL, "Buffer too small for the 'Change PIN' data");
+	/*
+	 * To keep things simple, assume that we can use the same PIN parameters for the new PIN as
+	 * for the old one, ignoring the ones specified by the caller, with the exception of the
+	 * PIN prompt and the PIN data itself.
+	 */
+	pin_cmd.cmd = SC_PIN_CMD_CHANGE;
+	pin_cmd.pin2 = pin_cmd.pin1;
+	pin_cmd.pin2.data = data->pin2.data;
+	pin_cmd.pin2.len = data->pin2.len;
+	pin_cmd.pin2.prompt = data->pin2.prompt;
 
-	if (data->pin1.data)
-		memcpy(pin_data, data->pin1.data, data->pin1.len);
-	if (data->pin2.data)
-		memcpy(pin_data + data->pin1.len, data->pin2.data, data->pin2.len);
-
-	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x24, 0, data->pin_reference);
-	apdu.data = pin_data;
-	apdu.datalen = data->pin1.len + data->pin2.len;
-	apdu.lc = apdu.datalen;
-
-	rv = sc_transmit_apdu(card, &apdu);
-	LOG_TEST_RET(ctx, rv, "APDU transmit failed");
-	rv = sc_check_sw(card, apdu.sw1, apdu.sw2);
-	LOG_TEST_RET(ctx, rv, "PIN cmd failed");
-
+	rv = iso_ops->pin_cmd(card, &pin_cmd, tries_left);
 	LOG_FUNC_RETURN(ctx, rv);
 }
 

@@ -133,6 +133,7 @@ static int iasecc_sdo_get_data(struct sc_card *card, struct iasecc_sdo *sdo);
 static int iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *data, struct iasecc_pin_policy *pin);
 static int iasecc_pin_get_status(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left);
 static int iasecc_pin_get_info(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left);
+static int iasecc_check_update_pin(struct sc_pin_cmd_data *data, struct sc_pin_cmd_pin *pin);
 static int iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, struct sc_pin_cmd_pin *pin);
 static int iasecc_get_free_reference(struct sc_card *card, struct iasecc_ctl_get_free_reference *ctl_data);
 static int iasecc_sdo_put_data(struct sc_card *card, struct iasecc_sdo_update *update);
@@ -1948,7 +1949,7 @@ iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	iasecc_chv_cache_clean(card, &pin_cmd);
 
 	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1);
-	LOG_TEST_RET(ctx, rv, "Merge 'PIN policy' error");
+	LOG_TEST_RET(ctx, rv, "Failed to update PIN1 info");
 
 	rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
 	LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
@@ -2120,6 +2121,27 @@ iasecc_pin_get_info(struct sc_card *card, struct sc_pin_cmd_data *data, int *tri
 
 
 /*
+ * Check PIN and update flags. We reject empty PINs (where data is non-NULL but length is 0) due
+ * to their non-obvious meaning in verification/change/unblock. We also need to update the
+ * SC_PIN_CMD_USE_PINPAD flag depending on the PIN being available or not (where data is NULL means
+ * that PIN is not available). Unfortunately we can not rely on the flag provided by the caller due
+ * to its ambiguous use. The approach here is to assume pin-pad input when the PIN data is NULL,
+ * otherwise not.
+ */
+static int iasecc_check_update_pin(struct sc_pin_cmd_data *data, struct sc_pin_cmd_pin *pin)
+{
+	if ((!pin->data && pin->len) || (pin->data && !pin->len))
+		return SC_ERROR_INVALID_ARGUMENTS;
+
+	if (pin->data)
+		data->flags &= ~SC_PIN_CMD_USE_PINPAD;
+	else
+		data->flags |= SC_PIN_CMD_USE_PINPAD;
+
+	return SC_SUCCESS;
+}
+
+/*
  * Retrieve the PIN policy and combine it with the existing fields in an intelligent way. This is
  * needed since we may be called with existing settings, typically from the PKCS #15 layer. We use
  * the IAS-ECC card-level PIN settings as complementary.
@@ -2133,6 +2155,9 @@ iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, stru
 
 	LOG_FUNC_CALLED(ctx);
 	sc_log(ctx, "iasecc_pin_merge_policy(card:%p)", card);
+
+	rv = iasecc_check_update_pin(data, pin);
+	LOG_TEST_RET(ctx, rv, "Invalid PIN");
 
 	rv = iasecc_pin_get_policy(card, data, &policy);
 	LOG_TEST_RET(ctx, rv, "Failed to get PIN policy");
@@ -2242,7 +2267,7 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	pin_cmd.cmd = SC_PIN_CMD_VERIFY;
 
 	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1);
-	LOG_TEST_RET(ctx, rv, "Merge 'PIN policy' error");
+	LOG_TEST_RET(ctx, rv, "Failed to update PIN1 info");
 
 	rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
 	LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
@@ -2257,6 +2282,9 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	pin_cmd.pin2.data = data->pin2.data;
 	pin_cmd.pin2.len = data->pin2.len;
 	pin_cmd.pin2.prompt = data->pin2.prompt;
+
+	rv = iasecc_check_update_pin(&pin_cmd, &pin_cmd.pin2);
+	LOG_TEST_RET(ctx, rv, "Invalid PIN2");
 
 	rv = iso_ops->pin_cmd(card, &pin_cmd, tries_left);
 	LOG_FUNC_RETURN(ctx, rv);
@@ -2348,7 +2376,7 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 	pin_cmd.pin1.len = 0;
 
 	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin2);
-	LOG_TEST_GOTO_ERR(ctx, rv, "Merge 'PIN policy' error");
+	LOG_TEST_GOTO_ERR(ctx, rv, "Failed to update PIN2 info");
 
 	rv = iso_ops->pin_cmd(card, &pin_cmd, tries_left);
 

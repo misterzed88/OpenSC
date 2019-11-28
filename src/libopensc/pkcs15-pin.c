@@ -647,8 +647,20 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 		data.flags |= SC_PIN_CMD_PUK_REF_AVAIL;
 	}
 
+	/*
+	 * With the current card driver interface we have no way of specifying different padding
+	 * flags for the PIN and the PUK. For backwards compatibility keep the old behaviour of
+	 * using the PIN info for the padding flags, but at least add a warning in case they
+	 * differ. In the future we should consider rejecting this case instead of only warning, or
+	 * extending the card driver interface to allow PIN-specific flags.
+	 */
 	if (auth_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_NEEDS_PADDING)
 		data.flags |= SC_PIN_CMD_NEED_PADDING;
+
+	if ((auth_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_NEEDS_PADDING) !=
+	    (puk_info->attrs.pin.flags & SC_PKCS15_PIN_FLAG_NEEDS_PADDING)) {
+		sc_log(ctx, "Warning: padding mismatch for PIN/PUK, unblock may fail");
+	}
 
 	switch (auth_info->attrs.pin.type) {
 	case SC_PKCS15_PIN_TYPE_BCD:

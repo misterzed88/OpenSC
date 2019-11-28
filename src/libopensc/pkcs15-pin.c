@@ -631,16 +631,16 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	data.pin_reference   = auth_info->attrs.pin.reference;
 	data.pin1.data       = puk;
 	data.pin1.len        = puklen;
-	data.pin1.pad_char   = auth_info->attrs.pin.pad_char;
-	data.pin1.min_length = auth_info->attrs.pin.min_length;
-	data.pin1.max_length = auth_info->attrs.pin.max_length;
-	data.pin1.pad_length = auth_info->attrs.pin.stored_length;
+	data.pin1.pad_char   = puk_info->attrs.pin.pad_char;
+	data.pin1.min_length = puk_info->attrs.pin.min_length;
+	data.pin1.max_length = puk_info->attrs.pin.max_length;
+	data.pin1.pad_length = puk_info->attrs.pin.stored_length;
 	data.pin2.data       = newpin;
 	data.pin2.len        = newpinlen;
-	data.pin2.pad_char   = puk_info->attrs.pin.pad_char;
-	data.pin2.min_length = puk_info->attrs.pin.min_length;
-	data.pin2.max_length = puk_info->attrs.pin.max_length;
-	data.pin2.pad_length = puk_info->attrs.pin.stored_length;
+	data.pin2.pad_char   = auth_info->attrs.pin.pad_char;
+	data.pin2.min_length = auth_info->attrs.pin.min_length;
+	data.pin2.max_length = auth_info->attrs.pin.max_length;
+	data.pin2.pad_length = auth_info->attrs.pin.stored_length;
 
 	if (puk_ref >= 0) {
 		data.puk_reference = puk_ref;

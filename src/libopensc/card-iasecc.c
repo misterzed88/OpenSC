@@ -2344,10 +2344,16 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 		unsigned char se_num = scb & IASECC_SCB_METHOD_MASK_REF;
 
 		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
-			sc_log(ctx, "Verify PIN in SE %X", se_num);
 			pin_cmd = *data;
-			pin_cmd.pin_type = SC_AC_SEN;
-			pin_cmd.pin_reference = se_num;
+			if (pin_cmd.flags & SC_PIN_CMD_PUK_REF_AVAIL)   {
+				sc_log(ctx, "Verify PIN with CHV %X", pin_cmd.puk_reference);
+				pin_cmd.pin_type = SC_AC_CHV;
+				pin_cmd.pin_reference = pin_cmd.puk_reference;
+			} else   {
+				sc_log(ctx, "Verify PIN in SE %X", se_num);
+				pin_cmd.pin_type = SC_AC_SEN;
+				pin_cmd.pin_reference = se_num;
+			}
 			rv = iasecc_pin_verify(card, &pin_cmd, tries_left);
 			LOG_TEST_GOTO_ERR(ctx, rv, "iasecc_pin_reset() verify PUK error");
 

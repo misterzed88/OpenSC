@@ -2162,6 +2162,16 @@ iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, stru
 	rv = iasecc_pin_get_policy(card, data, &policy);
 	LOG_TEST_RET(ctx, rv, "Failed to get PIN policy");
 
+	/*
+	 * Some cards obviously use the min/max length fields to signal PIN padding, instead of
+	 * using stored length.
+	 */
+	if (policy.min_length > 0 && policy.min_length == policy.max_length) {
+		if (policy.stored_length <= 0)
+			policy.stored_length = policy.min_length;
+		policy.min_length = 0;
+	}
+
 	/* Take the most limited values of min/max lengths */
 	if (policy.min_length > 0 && (size_t) policy.min_length > pin->min_length)
 		pin->min_length = policy.min_length;
@@ -2241,6 +2251,15 @@ iasecc_keyset_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tr
 }
 
 
+/*
+ * The PIN change function can handle different PIN-pad input combinations for the old and new
+ * PINs:
+ *   OLD PIN:   NEW PIN:     DESCRIPTION:
+ *   Available  Available    No input.
+ *   Available  Absent       Only new PIN is input.
+ *   Absent     Available    Both PINs are input (due to limitations in IAS-ECC)
+ *   Absent     Absent       Both PINs are input.
+ */
 static int
 iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
@@ -2260,8 +2279,9 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	/*
 	 * Verify the original PIN. This would normally not be needed since it is implicitly done
 	 * by the card when executing a PIN change command. But we must go through our verification
-	 * function in order to handle secure messaging setup, if enabled for the PIN. As a bonus
-	 * we have also retrieved the PIN policy which is used in the PIN change command below.
+	 * function in order to handle secure messaging setup, if enabled for the PIN. The
+	 * verification is skipped for PIN-pads (which do not work with SM anyway), to avoid that
+	 * the user has to enter the PIN twice.
 	 */
 	pin_cmd = *data;
 	pin_cmd.cmd = SC_PIN_CMD_VERIFY;
@@ -2269,19 +2289,29 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1);
 	LOG_TEST_RET(ctx, rv, "Failed to update PIN1 info");
 
-	rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
-	LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
+	if (!(pin_cmd.flags & SC_PIN_CMD_USE_PINPAD)) {
+		rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
+		LOG_TEST_RET(ctx, rv, "PIN CHV verification error");
+	}
 
 	/*
 	 * To keep things simple, assume that we can use the same PIN parameters for the new PIN as
 	 * for the old one, ignoring the ones specified by the caller, with the exception of the
-	 * PIN prompt and the PIN data itself.
+	 * PIN prompt and the PIN data itself. Note that the old PIN is re-verified since the
+	 * IAS-ECC specification has no implicit verification for the PIN change command. This also
+	 * forces us to always use PIN-pad for the second PIN if the first one was input on a
+	 * PIN-pad.
 	 */
 	pin_cmd.cmd = SC_PIN_CMD_CHANGE;
 	pin_cmd.pin2 = pin_cmd.pin1;
-	pin_cmd.pin2.data = data->pin2.data;
-	pin_cmd.pin2.len = data->pin2.len;
 	pin_cmd.pin2.prompt = data->pin2.prompt;
+	if (pin_cmd.flags & SC_PIN_CMD_USE_PINPAD) {
+		pin_cmd.pin2.data = NULL;
+		pin_cmd.pin2.len = 0;
+	} else {
+		pin_cmd.pin2.data = data->pin2.data;
+		pin_cmd.pin2.len = data->pin2.len;
+	}
 
 	rv = iasecc_check_update_pin(&pin_cmd, &pin_cmd.pin2);
 	LOG_TEST_RET(ctx, rv, "Invalid PIN2");
@@ -2291,6 +2321,15 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 }
 
 
+/*
+ * The PIN unblock function can handle different PIN-pad input combinations for the PUK and the new
+ * PIN:
+ *   PUK:       NEW PIN:     DESCRIPTION:
+ *   Available  Available    No input.
+ *   Available  Absent       Only new PIN is input.
+ *   Absent     Available    Only PUK is input.
+ *   Absent     Absent       Both PUK and new PIN are input.
+ */
 static int
 iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left)
 {

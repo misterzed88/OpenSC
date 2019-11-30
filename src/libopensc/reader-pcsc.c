@@ -1871,14 +1871,9 @@ static int part10_build_modify_pin_block(struct sc_reader *reader, u8 * buf, siz
 	}
 	pin_modify->bmPINLengthFormat = tmp;	/* bmPINLengthFormat */
 
-	/* Set offsets if not Case 1 APDU */
-	if (pin_ref->length_offset != 4) {
-		pin_modify->bInsertionOffsetOld = (data->pin1.offset >= 5 ? data->pin1.offset - 5 : 0);
-		pin_modify->bInsertionOffsetNew = (data->pin2.offset >= 5 ? data->pin2.offset - 5 : 0);
-	} else {
-		pin_modify->bInsertionOffsetOld = 0x00;
-		pin_modify->bInsertionOffsetNew = 0x00;
-	}
+	/* Set offsets if available, otherwise default to 0 */
+	pin_modify->bInsertionOffsetOld = (data->pin1.offset >= 5 ? data->pin1.offset - 5 : 0);
+	pin_modify->bInsertionOffsetNew = (data->pin2.offset >= 5 ? data->pin2.offset - 5 : 0);
 
 	if (!pin_ref->min_length || !pin_ref->max_length)
 		return SC_ERROR_INVALID_ARGUMENTS;

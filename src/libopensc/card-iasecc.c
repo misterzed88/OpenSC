@@ -63,6 +63,9 @@
 		| SC_CARD_CAP_USE_FCI_AC		\
 		| SC_CARD_CAP_ISO7816_PIN_INFO)
 
+/* Flags to iasecc_pin_merge_policy */
+#define IASECC_FORCE_PINPAD_PAD	1
+
 /* generic iso 7816 operations table */
 static const struct sc_card_operations *iso_ops = NULL;
 
@@ -134,7 +137,8 @@ static int iasecc_pin_get_policy (struct sc_card *card, struct sc_pin_cmd_data *
 static int iasecc_pin_get_status(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left);
 static int iasecc_pin_get_info(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_left);
 static int iasecc_check_update_pin(struct sc_pin_cmd_data *data, struct sc_pin_cmd_pin *pin);
-static int iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, struct sc_pin_cmd_pin *pin);
+static int iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data,
+				   struct sc_pin_cmd_pin *pin, int flags);
 static int iasecc_get_free_reference(struct sc_card *card, struct iasecc_ctl_get_free_reference *ctl_data);
 static int iasecc_sdo_put_data(struct sc_card *card, struct iasecc_sdo_update *update);
 
@@ -1948,7 +1952,7 @@ iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 
 	iasecc_chv_cache_clean(card, &pin_cmd);
 
-	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1);
+	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1, IASECC_FORCE_PINPAD_PAD);
 	LOG_TEST_RET(ctx, rv, "Failed to update PIN1 info");
 
 	rv = iasecc_chv_verify(card, &pin_cmd, tries_left);
@@ -2147,10 +2151,12 @@ static int iasecc_check_update_pin(struct sc_pin_cmd_data *data, struct sc_pin_c
  * the IAS-ECC card-level PIN settings as complementary.
  */
 static int
-iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, struct sc_pin_cmd_pin *pin)
+iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data,
+			struct sc_pin_cmd_pin *pin, int flags)
 {
 	struct sc_context *ctx = card->ctx;
 	struct iasecc_pin_policy policy;
+	size_t pad_len = 0;
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
@@ -2163,12 +2169,17 @@ iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, stru
 	LOG_TEST_RET(ctx, rv, "Failed to get PIN policy");
 
 	/*
-	 * Some cards obviously use the min/max length fields to signal PIN padding, instead of
-	 * using stored length.
+	 * PIN-pads work best with fixed-size lengths. If requested by caller flags, pad up to the
+	 * current PIN length, if available.
 	 */
+	if ((flags & IASECC_FORCE_PINPAD_PAD) && (data->flags & SC_PIN_CMD_USE_PINPAD)) {
+		if (policy.stored_length > 0)
+			pad_len = policy.stored_length;
+	}
+
+	/* Some cards obviously use the min/max length fields to signal PIN padding */
 	if (policy.min_length > 0 && policy.min_length == policy.max_length) {
-		if (policy.stored_length <= 0)
-			policy.stored_length = policy.min_length;
+		pad_len = policy.min_length;
 		policy.min_length = 0;
 	}
 
@@ -2179,12 +2190,11 @@ iasecc_pin_merge_policy(struct sc_card *card, struct sc_pin_cmd_data *data, stru
 		pin->max_length = policy.max_length;
 
 	/*
-	 * If we have padding info provided to us by the caller, it takes precedence. When not
-	 * available, attempt to get it from the stored length field of the PIN policy, assuming
-	 * 0xff as the padding character.
+	 * If we have padding info provided to us by the caller, it takes precedence. Otherwise use
+	 * the heuristic value, assuming 0xff as the padding character.
 	 */
-	if (!(data->flags & SC_PIN_CMD_NEED_PADDING) && policy.stored_length > 0) {
-		pin->pad_length = policy.stored_length;
+	if (!(data->flags & SC_PIN_CMD_NEED_PADDING) && pad_len) {
+		pin->pad_length = pad_len;
 		pin->pad_char = 0xff;
 		data->flags |= SC_PIN_CMD_NEED_PADDING;
 	}
@@ -2280,13 +2290,13 @@ iasecc_pin_change(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	 * Verify the original PIN. This would normally not be needed since it is implicitly done
 	 * by the card when executing a PIN change command. But we must go through our verification
 	 * function in order to handle secure messaging setup, if enabled for the PIN. The
-	 * verification is skipped for PIN-pads (which do not work with SM anyway), to avoid that
-	 * the user has to enter the PIN twice.
+	 * verification is skipped for PIN-pads (which do not work with SM anyway), to avoid the
+	 * user having to enter the PIN twice.
 	 */
 	pin_cmd = *data;
 	pin_cmd.cmd = SC_PIN_CMD_VERIFY;
 
-	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1);
+	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin1, 0);
 	LOG_TEST_RET(ctx, rv, "Failed to update PIN1 info");
 
 	if (!(pin_cmd.flags & SC_PIN_CMD_USE_PINPAD)) {
@@ -2420,7 +2430,7 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 	pin_cmd.flags |= SC_PIN_CMD_IMPLICIT_CHANGE;
 	pin_cmd.pin1.len = 0;
 
-	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin2);
+	rv = iasecc_pin_merge_policy(card, &pin_cmd, &pin_cmd.pin2, 0);
 	LOG_TEST_GOTO_ERR(ctx, rv, "Failed to update PIN2 info");
 
 	rv = iso_ops->pin_cmd(card, &pin_cmd, tries_left);

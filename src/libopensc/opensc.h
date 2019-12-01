@@ -418,7 +418,6 @@ typedef struct sc_reader {
 #define SC_PIN_CMD_USE_PINPAD		0x0001
 #define SC_PIN_CMD_NEED_PADDING		0x0002
 #define SC_PIN_CMD_IMPLICIT_CHANGE	0x0004
-#define SC_PIN_CMD_PUK_REF_AVAIL	0x0008
 
 #define SC_PIN_ENCODING_ASCII	0
 #define SC_PIN_ENCODING_BCD	1
@@ -458,7 +457,7 @@ struct sc_pin_cmd_data {
 
 	unsigned int pin_type;		/* usually SC_AC_CHV */
 	int pin_reference;
-	int puk_reference;		/* only valid when SC_PIN_CMD_PUK_REF_AVAIL set in flags */
+	int puk_reference;		/* non-zero means that reference is available */
 
 	struct sc_pin_cmd_pin pin1, pin2;
 

@@ -2343,7 +2343,7 @@ iasecc_pin_reset(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries_
 
 		if (scb & IASECC_SCB_METHOD_USER_AUTH)   {
 			pin_cmd = *data;
-			if (pin_cmd.flags & SC_PIN_CMD_PUK_REF_AVAIL)   {
+			if (pin_cmd.puk_reference)   {
 				sc_log(ctx, "Verify PIN with CHV %X", pin_cmd.puk_reference);
 				pin_cmd.pin_type = SC_AC_CHV;
 				pin_cmd.pin_reference = pin_cmd.puk_reference;

@@ -581,7 +581,7 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	struct sc_pin_cmd_data data;
 	struct sc_pkcs15_object *puk_obj;
 	struct sc_pkcs15_auth_info *puk_info = NULL;
-	int puk_ref = -1;
+	int pukref = 0;
 	struct sc_pkcs15_auth_info *auth_info = (struct sc_pkcs15_auth_info *)pin_obj->data;
 	struct sc_card *card = p15card->card;
 	int r;
@@ -603,7 +603,7 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	if (r >= 0 && puk_obj) {
 		/* second step:  get the pkcs15 info object of the puk */
 		puk_info = (struct sc_pkcs15_auth_info *)puk_obj->data;
-		puk_ref = puk_info->attrs.pin.reference;
+		pukref = puk_info->attrs.pin.reference;
 	}
 
 	if (!puk_info) {
@@ -629,6 +629,7 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	data.cmd             = SC_PIN_CMD_UNBLOCK;
 	data.pin_type        = SC_AC_CHV;
 	data.pin_reference   = auth_info->attrs.pin.reference;
+	data.puk_reference   = pukref;
 	data.pin1.data       = puk;
 	data.pin1.len        = puklen;
 	data.pin1.pad_char   = puk_info->attrs.pin.pad_char;
@@ -641,11 +642,6 @@ int sc_pkcs15_unblock_pin(struct sc_pkcs15_card *p15card,
 	data.pin2.min_length = auth_info->attrs.pin.min_length;
 	data.pin2.max_length = auth_info->attrs.pin.max_length;
 	data.pin2.pad_length = auth_info->attrs.pin.stored_length;
-
-	if (puk_ref >= 0) {
-		data.puk_reference = puk_ref;
-		data.flags |= SC_PIN_CMD_PUK_REF_AVAIL;
-	}
 
 	/*
 	 * With the current card driver interface we have no way of specifying different padding

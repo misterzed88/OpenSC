@@ -1906,7 +1906,7 @@ iasecc_pin_verify(struct sc_card *card, struct sc_pin_cmd_data *data, int *tries
 	unsigned reference = data->pin_reference;
 	struct sc_pin_cmd_data pin_cmd;
 	struct iasecc_pin_policy policy;
-	int tries_before_verify;
+	int tries_before_verify = -1;
 	int rv;
 
 	LOG_FUNC_CALLED(ctx);
